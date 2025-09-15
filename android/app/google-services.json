@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "453706001993",
+    "firebase_url": "https://bluebird-101b8-default-rtdb.firebaseio.com",
+    "project_id": "bluebird-101b8",
+    "storage_bucket": "bluebird-101b8.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:453706001993:android:a002fcca5fc243b429d998",
+        "android_client_info": {
+          "package_name": "com.example.bluebird_app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "453706001993-s2cpirjtt6n015h0p1s0n1ngg59cv07h.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDTS4iGNKnNJ1aQJ3weLHCaaOWTrHG2IjI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "453706001993-s2cpirjtt6n015h0p1s0n1ngg59cv07h.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "453706001993-5nbgpu8j5plcnvgf2jmnj3gpjjpij239.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.bluebirdApp"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
