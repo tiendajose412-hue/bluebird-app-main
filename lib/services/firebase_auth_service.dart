@@ -1,4 +1,4 @@
-// lib/services/firebase_auth_service.dart (OTP por correo de 4 dígitos, versión mejorada)
+// lib/services/firebase_auth_service.dart
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
@@ -6,34 +6,15 @@ import 'package:cloud_functions/cloud_functions.dart';
 class FirebaseAuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final FirebaseFunctions _functions = FirebaseFunctions.instanceFor(
-      region: 'us-central1'); // <- región correcta
+  // IMPORTANTE: usa la misma región donde desplegaste las Functions
+  final FirebaseFunctions _functions =
+      FirebaseFunctions.instanceFor(region: 'us-central1');
 
   // Usuario actual
   User? get currentUser => _auth.currentUser;
 
   // Stream de cambios de autenticación
   Stream<User?> get authStateChanges => _auth.authStateChanges();
-
-  // ---- Helper: traducir errores de Cloud Functions a mensajes amigables
-  String _mapFunctionsError(FirebaseFunctionsException e) {
-    switch (e.code) {
-      case 'unauthenticated':
-        return 'Debes iniciar sesión para continuar.';
-      case 'invalid-argument':
-        return 'Datos inválidos. Revisa el email/código.';
-      case 'permission-denied':
-        return 'El email no coincide con tu cuenta.';
-      case 'resource-exhausted':
-        return 'Espera 60 segundos antes de reenviar.';
-      case 'deadline-exceeded':
-        return 'El código expiró. Pide uno nuevo.';
-      case 'failed-precondition':
-        return 'No hay un código activo. Solicita uno primero.';
-      default:
-        return e.message ?? 'Error inesperado (Functions).';
-    }
-  }
 
   // ==============================
   // REGISTRO (OTP por correo)
@@ -45,35 +26,23 @@ class FirebaseAuthService {
   }) async {
     try {
       final result = await _auth.createUserWithEmailAndPassword(
-        email: email.trim(),
+        email: email,
         password: password,
       );
 
       final user = result.user!;
-      final normalizedEmail = email.trim().toLowerCase();
 
       // Guardar datos adicionales en Firestore
       await _firestore.collection('users').doc(user.uid).set({
-        'email': normalizedEmail,
+        'email': email,
         'phone': phone,
         'createdAt': FieldValue.serverTimestamp(),
         'emailVerified': false,
       }, SetOptions(merge: true));
 
       // Solicitar OTP por correo (Cloud Function)
-      try {
-        final callable = _functions.httpsCallable('requestEmailOtp');
-        await callable.call({'email': normalizedEmail});
-      } on FirebaseFunctionsException catch (e) {
-        // Si falló el envío inicial, opcionalmente borra el usuario para no dejar cuentas "a medias"
-        try {
-          await _firestore.collection('users').doc(user.uid).delete();
-        } catch (_) {}
-        try {
-          await user.delete();
-        } catch (_) {}
-        return {'success': false, 'message': _mapFunctionsError(e)};
-      }
+      final callable = _functions.httpsCallable('requestEmailOtp');
+      await callable.call({'email': email});
 
       return {
         'success': true,
@@ -108,7 +77,7 @@ class FirebaseAuthService {
   }) async {
     try {
       final result = await _auth.signInWithEmailAndPassword(
-        email: email.trim(),
+        email: email,
         password: password,
       );
 
@@ -165,58 +134,37 @@ class FirebaseAuthService {
   }
 
   // ==============================
-  // REENVIAR OTP
+  // REENVIAR OTP (verificación de email)
   // ==============================
   Future<Map<String, dynamic>> resendEmailOtp(String email) async {
     try {
-      final authEmail = _auth.currentUser?.email ?? '';
-      if (authEmail.toLowerCase().trim() != email.toLowerCase().trim()) {
-        return {
-          'success': false,
-          'message': 'El correo no coincide con el usuario actual.'
-        };
-      }
-
       final callable = _functions.httpsCallable('requestEmailOtp');
-      await callable.call({'email': email.trim().toLowerCase()});
+      await callable.call({'email': email});
       return {'success': true, 'message': 'Código reenviado'};
-    } on FirebaseFunctionsException catch (e) {
-      return {'success': false, 'message': _mapFunctionsError(e)};
     } catch (e) {
       return {'success': false, 'message': 'No se pudo reenviar: $e'};
     }
   }
 
   // ==============================
-  // VERIFICAR OTP
+  // VERIFICAR OTP (verificación de email)
   // ==============================
   Future<bool> verifyEmailCode({
     required String email,
     required String code,
   }) async {
     try {
-      final authEmail = _auth.currentUser?.email ?? '';
-      if (authEmail.toLowerCase().trim() != email.toLowerCase().trim()) {
-        throw Exception('El correo no coincide con el usuario actual.');
-      }
-
       final callable = _functions.httpsCallable('verifyEmailOtp');
-      await callable.call({
-        'email': email.trim().toLowerCase(),
-        'code': code.trim(),
-      });
-
+      await callable.call({'email': email, 'code': code});
       await _auth.currentUser?.reload();
       return _auth.currentUser?.emailVerified ?? false;
-    } on FirebaseFunctionsException catch (e) {
-      throw Exception(_mapFunctionsError(e));
     } catch (e) {
-      throw Exception('No se pudo verificar: $e');
+      rethrow;
     }
   }
 
   // ==============================
-  // SINCRONIZAR emailVerified (para botón "Ya verifiqué", si lo usas)
+  // SINCRONIZAR emailVerified
   // ==============================
   Future<bool> refreshAndSyncEmailVerified() async {
     final user = _auth.currentUser;
@@ -232,6 +180,46 @@ class FirebaseAuthService {
       return true;
     }
     return false;
+  }
+
+  // ==============================
+  // OLVIDÉ MI CONTRASEÑA — OTP por email
+  // ==============================
+  Future<Map<String, dynamic>> requestPasswordResetOtp(String email) async {
+    try {
+      final callable = _functions.httpsCallable('requestPasswordResetOtp');
+      await callable.call({'email': email.trim().toLowerCase()});
+      return {'success': true, 'message': 'Te enviamos un código a tu correo.'};
+    } on FirebaseFunctionsException catch (e) {
+      final msg = _mapFunctionsError(e);
+      return {'success': false, 'message': msg};
+    } catch (e) {
+      return {'success': false, 'message': 'Error inesperado: $e'};
+    }
+  }
+
+  Future<Map<String, dynamic>> resetPasswordWithOtp({
+    required String email,
+    required String code,
+    required String newPassword,
+  }) async {
+    try {
+      final callable = _functions.httpsCallable('resetPasswordWithOtp');
+      await callable.call({
+        'email': email.trim().toLowerCase(),
+        'code': code.trim(),
+        'newPassword': newPassword,
+      });
+      return {
+        'success': true,
+        'message': 'Contraseña actualizada. Inicia sesión.'
+      };
+    } on FirebaseFunctionsException catch (e) {
+      final msg = _mapFunctionsError(e);
+      return {'success': false, 'message': msg};
+    } catch (e) {
+      return {'success': false, 'message': 'Error inesperado: $e'};
+    }
   }
 
   // ==============================
@@ -252,6 +240,29 @@ class FirebaseAuthService {
       return {'success': false, 'message': 'No hay usuario autenticado'};
     } catch (e) {
       return {'success': false, 'message': 'Error al eliminar cuenta: $e'};
+    }
+  }
+
+  // ==============================
+  // Helpers
+  // ==============================
+  String _mapFunctionsError(FirebaseFunctionsException e) {
+    switch (e.code) {
+      case 'invalid-argument':
+        // Puede venir por datos inválidos o código incorrecto
+        return e.message ?? 'Datos inválidos. Revisa email/código/contraseña.';
+      case 'not-found':
+        return 'No existe usuario con ese email.';
+      case 'failed-precondition':
+        return 'No hay un código activo. Solicítalo primero.';
+      case 'deadline-exceeded':
+        return 'El código expiró. Pide uno nuevo.';
+      case 'resource-exhausted':
+        return 'Demasiados intentos o cooldown activo.';
+      case 'permission-denied':
+        return 'Permisos insuficientes.';
+      default:
+        return e.message ?? 'Error (Functions).';
     }
   }
 }

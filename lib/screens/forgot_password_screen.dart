@@ -1,10 +1,13 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+
 import '../constants/app_constants.dart';
 import '../widgets/custom_button.dart';
 import '../widgets/custom_text_field.dart';
-
 import '../utils/validators.dart';
-import 'package:google_fonts/google_fonts.dart';
+
+import '../services/firebase_auth_service.dart';
 
 class ForgotPasswordScreen extends StatefulWidget {
   const ForgotPasswordScreen({super.key});
@@ -14,6 +17,9 @@ class ForgotPasswordScreen extends StatefulWidget {
 }
 
 class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
+  // Servicios
+  final _svc = FirebaseAuthService();
+
   // Controladores
   final _emailController = TextEditingController();
   final _newPasswordController = TextEditingController();
@@ -29,43 +35,81 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   bool _isNewPasswordVisible = false;
   bool _isConfirmPasswordVisible = false;
   bool _isLoading = false;
+  bool _resending = false;
 
   // Control de pasos
   int _currentStep = 0; // 0: Email, 1: Código, 2: Nueva contraseña
   String _userEmail = "";
-  final String _correctCode = "1234"; // Código de ejemplo
 
-  // Timer para el código
-  int _timeRemaining = 300; // 5 minutos en segundos
-  bool _canResendCode = false;
+  // Timers
+  static const int _otpExpireSecondsTotal = 600; // 10 min (backend)
+  static const int _resendCooldownSecondsTotal = 60; // cooldown backend
+  int _expireSeconds = _otpExpireSecondsTotal;
+  int _resendCooldownSeconds = 0;
+  Timer? _expireTimer;
+  Timer? _cooldownTimer;
 
   @override
   void initState() {
     super.initState();
-    _startTimer();
   }
 
-  void _startTimer() {
-    Future.delayed(Duration(seconds: 1), () {
-      if (mounted && _timeRemaining > 0) {
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _newPasswordController.dispose();
+    _confirmPasswordController.dispose();
+    for (var c in _codeControllers) c.dispose();
+    for (var f in _codeFocusNodes) f.dispose();
+    _expireTimer?.cancel();
+    _cooldownTimer?.cancel();
+    super.dispose();
+  }
+
+  // ============================
+  // Timers
+  // ============================
+  void _startExpireTimer() {
+    _expireTimer?.cancel();
+    _expireSeconds = _otpExpireSecondsTotal;
+    _expireTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) return;
+      if (_expireSeconds > 0) {
         setState(() {
-          _timeRemaining--;
+          _expireSeconds--;
         });
-        _startTimer();
-      } else if (mounted) {
+      } else {
+        t.cancel();
+        setState(() {});
+      }
+    });
+  }
+
+  void _startCooldownTimer() {
+    _cooldownTimer?.cancel();
+    _resendCooldownSeconds = _resendCooldownSecondsTotal;
+    _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) return;
+      if (_resendCooldownSeconds > 0) {
         setState(() {
-          _canResendCode = true;
+          _resendCooldownSeconds--;
         });
+      } else {
+        t.cancel();
+        setState(() {});
       }
     });
   }
 
   String _formatTime(int seconds) {
-    int minutes = seconds ~/ 60;
-    int remainingSeconds = seconds % 60;
-    return '${minutes.toString().padLeft(2, '0')}:${remainingSeconds.toString().padLeft(2, '0')}';
+    final m = seconds ~/ 60;
+    final s = seconds % 60;
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
+  // ============================
+  // UI
+  // ============================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -86,15 +130,9 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 SizedBox(height: AppConstants.paddingXLarge),
-
-                // Indicador de pasos
                 _buildStepIndicator(),
-
                 SizedBox(height: AppConstants.paddingXLarge),
-
-                // Contenido según el paso actual
                 _buildStepContent(),
-
                 SizedBox(height: AppConstants.paddingXLarge * 2),
 
                 // Botón principal
@@ -104,7 +142,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                   onPressed: _handleButtonPress,
                 ),
 
-                // Información adicional según el paso
+                // “Reenviar” y contador solo en paso 1 (código)
                 if (_currentStep == 1) ...[
                   SizedBox(height: AppConstants.paddingLarge),
                   _buildResendSection(),
@@ -188,14 +226,13 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
 
   Widget _buildStepLine(int step) {
     bool isActive = _currentStep > step;
-
     return Container(
       height: 2,
       width: 32,
       color: isActive
           ? AppConstants.primaryBlue
           : AppConstants.subtitleColor.withOpacity(0.3),
-      margin: EdgeInsets.only(bottom: 24),
+      margin: const EdgeInsets.only(bottom: 24),
     );
   }
 
@@ -215,20 +252,10 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   Widget _buildEmailStep() {
     return Column(
       children: [
-        // Título con icono
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.email_outlined,
-              color: AppConstants.lightBlue,
-              size: 32,
-            ),
-          ],
-        ),
-
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(Icons.email_outlined, color: AppConstants.lightBlue, size: 32),
+        ]),
         SizedBox(height: AppConstants.paddingMedium),
-
         Text(
           '¿Olvidaste tu contraseña?',
           style: GoogleFonts.poppins(
@@ -238,29 +265,23 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           ),
           textAlign: TextAlign.center,
         ),
-
         SizedBox(height: AppConstants.paddingMedium),
-
         Text(
-          'Ingresa tu correo electrónico y te enviaremos un código de verificación',
+          'Ingresa tu correo y te enviaremos un código de verificación.',
           style: GoogleFonts.poppins(
             color: AppConstants.subtitleColor,
             fontSize: 14,
           ),
           textAlign: TextAlign.center,
         ),
-
         SizedBox(height: AppConstants.paddingXLarge),
-
         CustomTextField(
           hint: AppConstants.emailHint,
           controller: _emailController,
           keyboardType: TextInputType.emailAddress,
           validator: Validators.validateEmail,
-          prefixIcon: Icon(
-            Icons.email_outlined,
-            color: AppConstants.subtitleColor,
-          ),
+          prefixIcon:
+              Icon(Icons.email_outlined, color: AppConstants.subtitleColor),
         ),
       ],
     );
@@ -269,15 +290,9 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   Widget _buildCodeStep() {
     return Column(
       children: [
-        // Título con código
-        Text(
-          '📱',
-          style: TextStyle(fontSize: 48),
-          textAlign: TextAlign.center,
-        ),
-
+        const Text('📱',
+            style: TextStyle(fontSize: 48), textAlign: TextAlign.center),
         SizedBox(height: AppConstants.paddingMedium),
-
         Text(
           'Código de Verificación',
           style: GoogleFonts.poppins(
@@ -287,9 +302,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           ),
           textAlign: TextAlign.center,
         ),
-
         SizedBox(height: AppConstants.paddingMedium),
-
         RichText(
           textAlign: TextAlign.center,
           text: TextSpan(
@@ -298,7 +311,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
               fontSize: 14,
             ),
             children: [
-              TextSpan(text: 'Hemos enviado un código de 4 dígitos a\n'),
+              const TextSpan(text: 'Hemos enviado un código de 4 dígitos a\n'),
               TextSpan(
                 text: _userEmail,
                 style: GoogleFonts.poppins(
@@ -309,46 +322,14 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             ],
           ),
         ),
-
         SizedBox(height: AppConstants.paddingXLarge),
 
-        // Campos de código de verificación
+        // 4 dígitos
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: List.generate(4, (index) => _buildCodeField(index)),
         ),
-
         SizedBox(height: AppConstants.paddingLarge),
-
-        // Código de ejemplo (solo para demo)
-        Container(
-          padding: EdgeInsets.all(AppConstants.paddingMedium),
-          decoration: BoxDecoration(
-            color: AppConstants.lightBlue.withOpacity(0.1),
-            borderRadius: BorderRadius.circular(AppConstants.radiusSmall),
-            border: Border.all(color: AppConstants.lightBlue.withOpacity(0.3)),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                Icons.info_outline,
-                color: AppConstants.lightBlue,
-                size: 20,
-              ),
-              SizedBox(width: AppConstants.paddingSmall),
-              Expanded(
-                child: Text(
-                  'Código de ejemplo: 1234',
-                  style: GoogleFonts.poppins(
-                    color: AppConstants.lightBlue,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
       ],
     );
   }
@@ -356,20 +337,10 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   Widget _buildPasswordStep() {
     return Column(
       children: [
-        // Título con candado
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.lock_reset,
-              color: AppConstants.lightBlue,
-              size: 32,
-            ),
-          ],
-        ),
-
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(Icons.lock_reset, color: AppConstants.lightBlue, size: 32),
+        ]),
         SizedBox(height: AppConstants.paddingMedium),
-
         Text(
           'Nueva Contraseña',
           style: GoogleFonts.poppins(
@@ -379,58 +350,43 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           ),
           textAlign: TextAlign.center,
         ),
-
         SizedBox(height: AppConstants.paddingMedium),
-
         Text(
-          'Crea una nueva contraseña segura para tu cuenta',
+          'Crea una nueva contraseña segura para tu cuenta.',
           style: GoogleFonts.poppins(
             color: AppConstants.subtitleColor,
             fontSize: 14,
           ),
           textAlign: TextAlign.center,
         ),
-
         SizedBox(height: AppConstants.paddingXLarge),
-
         // Nueva contraseña
         CustomTextField(
           hint: AppConstants.newPasswordHint,
           controller: _newPasswordController,
           isPassword: !_isNewPasswordVisible,
           validator: Validators.validatePassword,
-          prefixIcon: Icon(
-            Icons.lock_outlined,
-            color: AppConstants.subtitleColor,
-          ),
+          prefixIcon:
+              Icon(Icons.lock_outlined, color: AppConstants.subtitleColor),
           suffixIcon: IconButton(
             icon: Icon(
               _isNewPasswordVisible ? Icons.visibility : Icons.visibility_off,
               color: AppConstants.subtitleColor,
             ),
-            onPressed: () {
-              setState(() {
-                _isNewPasswordVisible = !_isNewPasswordVisible;
-              });
-            },
+            onPressed: () =>
+                setState(() => _isNewPasswordVisible = !_isNewPasswordVisible),
           ),
         ),
-
         SizedBox(height: AppConstants.paddingMedium),
-
-        // Confirmar contraseña
+        // Confirmar
         CustomTextField(
           hint: AppConstants.confirmPasswordHint,
           controller: _confirmPasswordController,
           isPassword: !_isConfirmPasswordVisible,
-          validator: (value) => Validators.validateConfirmPassword(
-            value,
-            _newPasswordController.text,
-          ),
-          prefixIcon: Icon(
-            Icons.lock_outlined,
-            color: AppConstants.subtitleColor,
-          ),
+          validator: (v) => Validators.validateConfirmPassword(
+              v, _newPasswordController.text),
+          prefixIcon:
+              Icon(Icons.lock_outlined, color: AppConstants.subtitleColor),
           suffixIcon: IconButton(
             icon: Icon(
               _isConfirmPasswordVisible
@@ -438,11 +394,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                   : Icons.visibility_off,
               color: AppConstants.subtitleColor,
             ),
-            onPressed: () {
-              setState(() {
-                _isConfirmPasswordVisible = !_isConfirmPasswordVisible;
-              });
-            },
+            onPressed: () => setState(
+                () => _isConfirmPasswordVisible = !_isConfirmPasswordVisible),
           ),
         ),
       ],
@@ -478,7 +431,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           ),
           errorBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(AppConstants.radiusMedium),
-            borderSide: BorderSide(color: Colors.red, width: 2),
+            borderSide: const BorderSide(color: Colors.red, width: 2),
           ),
         ),
         onChanged: (value) {
@@ -487,25 +440,21 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           } else if (value.isEmpty && index > 0) {
             _codeFocusNodes[index - 1].requestFocus();
           }
-
-          // Auto verificar cuando se completen los 4 dígitos
-          if (index == 3 && value.isNotEmpty) {
-            _checkAutoCode();
-          }
         },
       ),
     );
   }
 
   Widget _buildResendSection() {
+    final canResend = _resendCooldownSeconds == 0;
     return Column(
       children: [
         Text(
-          _timeRemaining > 0
-              ? 'Código expira en: ${_formatTime(_timeRemaining)}'
+          _expireSeconds > 0
+              ? 'Código expira en: ${_formatTime(_expireSeconds)}'
               : 'El código ha expirado',
           style: GoogleFonts.poppins(
-            color: _timeRemaining > 0 ? AppConstants.subtitleColor : Colors.red,
+            color: _expireSeconds > 0 ? AppConstants.subtitleColor : Colors.red,
             fontSize: 14,
             fontWeight: FontWeight.w500,
           ),
@@ -513,18 +462,27 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
         ),
         SizedBox(height: AppConstants.paddingMedium),
         TextButton(
-          onPressed: _canResendCode || _timeRemaining <= 0 ? _resendCode : null,
-          child: Text(
-            '¿No recibiste el código?\nReenviar código',
-            style: GoogleFonts.poppins(
-              color: (_canResendCode || _timeRemaining <= 0)
-                  ? AppConstants.lightBlue
-                  : AppConstants.subtitleColor,
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-            ),
-            textAlign: TextAlign.center,
-          ),
+          onPressed: (_expireSeconds <= 0 || canResend) && !_resending
+              ? _resendCode
+              : null,
+          child: _resending
+              ? const SizedBox(
+                  height: 20,
+                  width: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : Text(
+                  canResend
+                      ? '¿No recibiste el código?\nReenviar código'
+                      : 'Espera ${_formatTime(_resendCooldownSeconds)} para reenviar',
+                  style: GoogleFonts.poppins(
+                    color: canResend
+                        ? AppConstants.lightBlue
+                        : AppConstants.subtitleColor,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
         ),
       ],
     );
@@ -543,6 +501,9 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     }
   }
 
+  // ============================
+  // Handlers
+  // ============================
   void _handleButtonPress() {
     switch (_currentStep) {
       case 0:
@@ -557,85 +518,103 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     }
   }
 
-  void _handleSendCode() async {
-    if (_formKey.currentState!.validate()) {
-      setState(() {
-        _isLoading = true;
-      });
+  Future<void> _handleSendCode() async {
+    if (!_formKey.currentState!.validate()) return;
 
-      await Future.delayed(Duration(seconds: 2));
+    final email = _emailController.text.trim().toLowerCase();
+    setState(() => _isLoading = true);
 
+    final r = await _svc.requestPasswordResetOtp(email);
+    setState(() => _isLoading = false);
+
+    if (r['success'] == true) {
       setState(() {
-        _isLoading = false;
-        _userEmail = _emailController.text;
+        _userEmail = email;
         _currentStep = 1;
-        _timeRemaining = 300; // Reiniciar timer
-        _canResendCode = false;
+        _clearCodeFields();
+        _startExpireTimer(); // 10 min
+        _startCooldownTimer(); // 60 s cooldown
       });
-
-      _startTimer();
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Row(
             children: [
-              Icon(Icons.mark_email_read, color: Colors.white),
-              SizedBox(width: 8),
+              const Icon(Icons.mark_email_read, color: Colors.white),
+              const SizedBox(width: 8),
               Expanded(child: Text('Código enviado a $_userEmail')),
             ],
           ),
           backgroundColor: AppConstants.primaryBlue,
         ),
       );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(
+                r['message']?.toString() ?? 'No se pudo enviar el código')),
+      );
     }
   }
 
   void _handleVerifyCode() {
-    String enteredCode = _codeControllers.map((c) => c.text).join();
-
-    if (enteredCode.length != 4) {
+    final code = _codeControllers.map((c) => c.text).join();
+    if (code.length != 4 || code.contains(RegExp(r'\D'))) {
       _showErrorDialog('Por favor ingresa los 4 dígitos del código');
       return;
     }
-
-    if (enteredCode == _correctCode) {
-      setState(() {
-        _currentStep = 2;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Row(
-            children: [
-              Icon(Icons.verified_user, color: Colors.white),
-              SizedBox(width: 8),
-              Text('¡Código verificado correctamente!'),
-            ],
-          ),
-          backgroundColor: Colors.green,
-        ),
-      );
-    } else {
-      _showErrorDialog(
-          'Código incorrecto. Intenta de nuevo.\n(Código correcto: 1234)');
-      _clearCodeFields();
+    if (_expireSeconds <= 0) {
+      _showErrorDialog('El código expiró. Reenvíalo.');
+      return;
     }
+    // Si todo ok, pasamos a nueva contraseña
+    setState(() => _currentStep = 2);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: const [
+            Icon(Icons.verified_user, color: Colors.white),
+            SizedBox(width: 8),
+            Text('¡Código ingresado! Ingresa tu nueva contraseña.'),
+          ],
+        ),
+        backgroundColor: Colors.green,
+      ),
+    );
   }
 
-  void _handleChangePassword() async {
-    if (_formKey.currentState!.validate()) {
-      setState(() {
-        _isLoading = true;
-      });
+  Future<void> _handleChangePassword() async {
+    if (!_formKey.currentState!.validate()) return;
 
-      await Future.delayed(Duration(seconds: 2));
+    final code = _codeControllers.map((c) => c.text).join();
+    final p1 = _newPasswordController.text.trim();
+    final p2 = _confirmPasswordController.text.trim();
 
-      setState(() {
-        _isLoading = false;
-      });
+    if (code.length != 4 || code.contains(RegExp(r'\D'))) {
+      _showErrorDialog('Código inválido.');
+      return;
+    }
+    if (p1.length < 6) {
+      _showErrorDialog('La contraseña debe tener al menos 6 caracteres');
+      return;
+    }
+    if (p1 != p2) {
+      _showErrorDialog('Las contraseñas no coinciden');
+      return;
+    }
 
+    setState(() => _isLoading = true);
+    final r = await _svc.resetPasswordWithOtp(
+      email: _userEmail,
+      code: code,
+      newPassword: p1,
+    );
+    setState(() => _isLoading = false);
+
+    if (r['success'] == true) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+        const SnackBar(
           content: Row(
             children: [
               Icon(Icons.check_circle, color: Colors.white),
@@ -646,45 +625,37 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           backgroundColor: Colors.green,
         ),
       );
-
-      // Regresar a la pantalla de login después de cambiar la contraseña
-      Future.delayed(Duration(seconds: 1), () {
+      // Volver a login
+      Future.delayed(const Duration(seconds: 1), () {
+        if (!mounted) return;
         Navigator.popUntil(context, (route) => route.isFirst);
       });
+    } else {
+      _showErrorDialog(
+          r['message']?.toString() ?? 'No se pudo cambiar la contraseña');
     }
   }
 
-  void _checkAutoCode() {
-    String enteredCode = _codeControllers.map((c) => c.text).join();
-    if (enteredCode.length == 4 && enteredCode == _correctCode) {
-      Future.delayed(Duration(milliseconds: 500), () {
-        if (mounted) _handleVerifyCode();
-      });
+  Future<void> _resendCode() async {
+    if (_resending) return;
+    setState(() => _resending = true);
+    final r = await _svc.requestPasswordResetOtp(_userEmail);
+    setState(() => _resending = false);
+
+    if (r['success'] == true) {
+      _clearCodeFields();
+      _startExpireTimer(); // reinicia 10 min
+      _startCooldownTimer(); // reinicia 60 s
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Nuevo código enviado a $_userEmail'),
+          backgroundColor: AppConstants.primaryBlue,
+        ),
+      );
+    } else {
+      _showErrorDialog(
+          r['message']?.toString() ?? 'No se pudo reenviar el código');
     }
-  }
-
-  void _resendCode() async {
-    setState(() {
-      _isLoading = true;
-    });
-
-    await Future.delayed(Duration(seconds: 1));
-
-    setState(() {
-      _isLoading = false;
-      _timeRemaining = 300;
-      _canResendCode = false;
-    });
-
-    _clearCodeFields();
-    _startTimer();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Nuevo código enviado a $_userEmail'),
-        backgroundColor: AppConstants.primaryBlue,
-      ),
-    );
   }
 
   void _clearCodeFields() {
@@ -704,7 +675,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
         ),
         title: Row(
           children: [
-            Icon(Icons.error_outline, color: Colors.red, size: 24),
+            const Icon(Icons.error_outline, color: Colors.red, size: 24),
             SizedBox(width: AppConstants.paddingSmall),
             Text(
               'Error',
@@ -733,19 +704,5 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
         ],
       ),
     );
-  }
-
-  @override
-  void dispose() {
-    _emailController.dispose();
-    _newPasswordController.dispose();
-    _confirmPasswordController.dispose();
-    for (var controller in _codeControllers) {
-      controller.dispose();
-    }
-    for (var focusNode in _codeFocusNodes) {
-      focusNode.dispose();
-    }
-    super.dispose();
   }
 }
